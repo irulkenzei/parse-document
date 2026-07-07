@@ -1,0 +1,11 @@
+{
+  "name": "parse-document",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "dependencies": {
+    "node-appwrite": "^13.0.0",
+    "epub2": "^3.0.2",
+    "html-to-text": "^9.0.5"
+  }
+}
