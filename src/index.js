@@ -153,16 +153,9 @@ export default async ({ req, res, log, error }) => {
       return res.json({ success: false, error: 'userId, fileId, and bucketId are required' }, 400);
     }
 
-    const ext = String(fileName || '').split('.').pop()?.toLowerCase();
-    if (!SUPPORTED_FORMATS.includes(ext)) {
-      // PDF belum didukung di versi ini -- parser-nya (dengan heuristik
-      // deteksi bab yang lebih rumit) ditambahkan menyusul kalau diperlukan.
-      return res.json({
-        success: false,
-        error: `Format '.${ext}' belum didukung di versi ini. Saat ini yang bisa diproses: ${SUPPORTED_FORMATS.join(', ')}.`,
-      }, 400);
-    }
-
+    // Inisialisasi client SEBELUM validasi format, supaya cleanup file bisa
+    // dipanggil di SEMUA jalur kegagalan (termasuk "format tidak didukung"),
+    // bukan cuma di catch-all paling bawah.
     const client = new Client()
       .setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
       .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID)
@@ -170,6 +163,31 @@ export default async ({ req, res, log, error }) => {
 
     const storage = new Storage(client);
     const databases = new Databases(client);
+
+    // 🧹 Hapus file yang sudah ter-upload dari Storage kalau proses parsing
+    // gagal di titik manapun -- supaya tidak ada file "yatim piatu" yang
+    // nyangkut tanpa pernah punya dokumen `documents`/`document_chapters`
+    // terkait. Dibungkus try/catch sendiri supaya kegagalan cleanup tidak
+    // menutupi pesan error ASLI yang mau ditampilkan ke user.
+    const cleanupUploadedFile = async () => {
+      try {
+        await storage.deleteFile(bucketId, fileId);
+        log(`Cleaned up orphaned file ${fileId} after failed parse.`);
+      } catch (cleanupErr) {
+        error(`Gagal cleanup file ${fileId}: ${cleanupErr.message}`);
+      }
+    };
+
+    const ext = String(fileName || '').split('.').pop()?.toLowerCase();
+    if (!SUPPORTED_FORMATS.includes(ext)) {
+      // PDF belum didukung di versi ini -- parser-nya (dengan heuristik
+      // deteksi bab yang lebih rumit) ditambahkan menyusul kalau diperlukan.
+      await cleanupUploadedFile();
+      return res.json({
+        success: false,
+        error: `Format '.${ext}' belum didukung di versi ini. Saat ini yang bisa diproses: ${SUPPORTED_FORMATS.join(', ')}.`,
+      }, 400);
+    }
 
     // 1. Download file dari Appwrite Storage ke temp file lokal.
     //    epub2/mammoth butuh path file di disk, tidak bisa langsung dari
@@ -189,6 +207,7 @@ export default async ({ req, res, log, error }) => {
     }
 
     if (!parsed.chapters.length) {
+      await cleanupUploadedFile();
       return res.json({
         success: false,
         error: 'No readable text found in this document.',
@@ -248,6 +267,27 @@ export default async ({ req, res, log, error }) => {
   } catch (err) {
     error('CRITICAL ERROR: ' + err.message);
     if (err.stack) error('Stack trace: ' + err.stack);
+
+    // 🧹 Cleanup juga di catch-all -- kalau gagal di tengah proses download/
+    // parsing/simpan chapter (error tak terduga apapun), file sumbernya
+    // tetap dihapus supaya tidak jadi sampah di Storage.
+    try {
+      const cleanupClient = new Client()
+        .setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
+        .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID)
+        .setKey(process.env.APPWRITE_API_KEY);
+      const cleanupStorage = new Storage(cleanupClient);
+      const payload = req.body
+        ? (typeof req.body === 'string' ? JSON.parse(req.body) : req.body)
+        : {};
+      if (payload.bucketId && payload.fileId) {
+        await cleanupStorage.deleteFile(payload.bucketId, payload.fileId);
+        log(`Cleaned up orphaned file ${payload.fileId} after unexpected error.`);
+      }
+    } catch (cleanupErr) {
+      error(`Gagal cleanup file setelah error tak terduga: ${cleanupErr.message}`);
+    }
+
     return res.json({ success: false, error: err.message }, 500);
   } finally {
     // Bersihkan temp file, apapun hasilnya (sukses atau gagal)
