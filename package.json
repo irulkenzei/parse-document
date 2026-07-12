@@ -1,12 +1,15 @@
 {
   "name": "parse-document",
   "version": "1.0.0",
-  "type": "module",
   "main": "src/index.js",
   "dependencies": {
     "node-appwrite": "^13.0.0",
-    "epub2": "^3.0.2",
-    "html-to-text": "^9.0.5",
-    "mammoth": "^1.8.0"
+    "node-fetch-native-with-agent": "^1.7.2",
+    "mammoth": "^1.8.0",
+    "docx": "^9.7.1",
+    "pdfkit": "^0.19.1",
+    "epub-gen": "^0.1.0",
+    "adm-zip": "^0.5.16",
+    "pdfjs-dist": "^4.7.76"
   }
 }
