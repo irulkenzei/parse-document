@@ -1,15 +1,10 @@
 {
-  "name": "convert-document",
-  "version": "1.0.0",
-  "main": "index.js",
+  "name": "parse-document",
+  "version": "2.0.0",
+  "main": "src/index.js",
   "dependencies": {
     "node-appwrite": "^13.0.0",
-    "node-fetch-native-with-agent": "^1.7.2",
     "mammoth": "^1.8.0",
-    "docx": "^9.7.1",
-    "pdfkit": "^0.19.1",
-    "epub-gen": "^0.1.0",
-    "adm-zip": "^0.5.16",
-    "pdfjs-dist": "^4.7.76"
+    "adm-zip": "^0.5.16"
   }
 }
