@@ -1,7 +1,7 @@
 {
-  "name": "parse-document",
+  "name": "convert-document",
   "version": "1.0.0",
-  "main": "src/index.js",
+  "main": "index.js",
   "dependencies": {
     "node-appwrite": "^13.0.0",
     "node-fetch-native-with-agent": "^1.7.2",
