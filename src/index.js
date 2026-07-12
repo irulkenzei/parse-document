@@ -1,9 +1,8 @@
 const { Client, Databases, Storage, ID } = require('node-appwrite');
-// 🐛 FIX: index.js ini ada di src/, sedangkan pushNotificationHelper.js
-// ada di shared-helpers/ (sejajar src/, bukan di dalamnya) -- path
-// sebelumnya ('./pushNotificationHelper') nyari file di src/ (gak ada).
-// Harus naik satu folder dulu (..) baru masuk shared-helpers/.
-const { sendPushNotification } = require('../shared-helpers/pushNotificationHelper');
+// 🐛 FIX: di repo convert-document, index.js ada di ROOT (sejajar
+// shared-helpers/), BUKAN di dalam src/. Jadi path ke
+// pushNotificationHelper TURUN satu level ke shared-helpers/, bukan naik.
+const { sendPushNotification } = require('./shared-helpers/pushNotificationHelper');
 // 🔧 FIX: `InputFile` TIDAK ADA di node-appwrite v13 (itu API dari versi
 // SDK lain/beda) -- versi ini butuh objek `File` ASLI dari package
 // `node-fetch-native-with-agent` (dependency internal node-appwrite
