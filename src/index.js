@@ -1,4 +1,4 @@
-const { Client, Storage } = require('node-appwrite');
+const { Client, Databases, Storage, ID } = require('node-appwrite');
 const mammoth = require('mammoth');
 const AdmZip = require('adm-zip');
 
@@ -147,11 +147,32 @@ async function extractChaptersFromDocx(buffer) {
 // ============================================================
 // MAIN HANDLER
 // ------------------------------------------------------------
+// 🔧 ARSITEKTUR: function ini dipanggil ASYNCHRONOUS (hindari limit 30
+// detik synchronous execution). Karena `responseBody` dari getExecution()
+// TERBUKTI SELALU KOSONG buat eksekusi async (keterbatasan resmi
+// Appwrite), hasilnya ditulis LANGSUNG ke Database -- client poll
+// dokumen `documents` (bukan status eksekusi) buat tau kapan selesai.
+//
+// Skema yang dipakai (SUDAH ADA, bukan bikin baru):
+//   documents:         user_id, title, source_file_id, format,
+//                       chapter_count, status
+//   document_chapters: book_id (-> documents.$id), chapter_index,
+//                       title, text_content
+// ------------------------------------------------------------
 module.exports = async ({ req, res, log, error }) => {
+  const DATABASE_ID = process.env.APPWRITE_DATABASE_ID;
+  const DOCUMENTS_COLLECTION_ID = 'documents';
+  const CHAPTERS_COLLECTION_ID = 'document_chapters';
+
+  let requestId;
+  let databases;
+
   try {
     const payload = JSON.parse(req.body || '{}');
-    const { fileId, bucketId, fileName } = payload;
+    const { requestId: reqId, fileId, bucketId, fileName } = payload;
+    requestId = reqId;
 
+    if (!requestId) return res.json({ success: false, error: 'requestId is required' }, 400);
     if (!fileId) return res.json({ success: false, error: 'fileId is required' }, 400);
     if (!bucketId) return res.json({ success: false, error: 'bucketId is required' }, 400);
     if (!fileName) return res.json({ success: false, error: 'fileName is required' }, 400);
@@ -161,6 +182,7 @@ module.exports = async ({ req, res, log, error }) => {
       .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID)
       .setKey(process.env.APPWRITE_API_KEY);
     const storage = new Storage(client);
+    databases = new Databases(client);
 
     log(`Parsing document "${fileName}" (fileId: ${fileId})`);
 
@@ -179,17 +201,62 @@ module.exports = async ({ req, res, log, error }) => {
     } else if (ext === 'docx') {
       chapters = await extractChaptersFromDocx(buffer);
     } else {
-      return res.json({ success: false, error: `Unsupported file format: .${ext}. Only EPUB and DOCX are supported.` }, 400);
+      // ⚠️ Tidak ada kolom error_message di collection `documents` --
+      // detail error cukup di-log() server-side (kelihatan di tab
+      // Executions), status 'failed' aja yang perlu diketahui client.
+      await databases.updateDocument(DATABASE_ID, DOCUMENTS_COLLECTION_ID, requestId, { status: 'failed' });
+      return res.json({ success: false, error: `Unsupported file format: .${ext}` }, 400);
     }
 
     if (chapters.length === 0) {
-      return res.json({ success: false, error: 'No chapters could be extracted from this document.' }, 400);
+      await databases.updateDocument(DATABASE_ID, DOCUMENTS_COLLECTION_ID, requestId, { status: 'failed' });
+      return res.json({ success: false, error: 'No chapters could be extracted.' }, 400);
     }
 
     log(`Extracted ${chapters.length} chapter(s) from "${title}"`);
-    return res.json({ success: true, title, chapters });
+
+    // ⚠️ text_content dibatesin 100.000 karakter di skema -- kalau ada
+    // chapter yang lebih panjang dari itu (buku tebal, bab gak dipecah
+    // kecil-kecil), createDocument bakal REJECT baris itu. Dipotong di
+    // sini SUPAYA GAK GAGAL TOTAL -- lebih baik chapter kepotong drpd
+    // seluruh proses gagal. Kalau ini kejadian, chapter yang kepotong
+    // logged sebagai warning biar ketauan.
+    const MAX_CONTENT_SIZE = 100000;
+
+    // Tulis tiap chapter sebagai baris terpisah di document_chapters
+    for (let i = 0; i < chapters.length; i++) {
+      const ch = chapters[i];
+      let content = ch.content;
+      if (content.length > MAX_CONTENT_SIZE) {
+        log(`WARNING: Chapter ${i + 1} ("${ch.title}") exceeds ${MAX_CONTENT_SIZE} chars (${content.length}), truncating.`);
+        content = content.slice(0, MAX_CONTENT_SIZE);
+      }
+      await databases.createDocument(DATABASE_ID, CHAPTERS_COLLECTION_ID, ID.unique(), {
+        book_id: requestId,
+        chapter_index: i,
+        title: ch.title,
+        text_content: content,
+      });
+    }
+
+    // ✅ Update dokumen `documents` -- INI yang di-poll client buat tau
+    // kapan selesai.
+    await databases.updateDocument(DATABASE_ID, DOCUMENTS_COLLECTION_ID, requestId, {
+      title,
+      chapter_count: chapters.length,
+      status: 'completed',
+    });
+
+    return res.json({ success: true });
   } catch (err) {
     error(`Parse failed: ${err.message}`);
+    if (requestId && databases) {
+      try {
+        await databases.updateDocument(DATABASE_ID, 'documents', requestId, { status: 'failed' });
+      } catch (updateErr) {
+        error(`Failed to update job status: ${updateErr.message}`);
+      }
+    }
     return res.json({ success: false, error: err.message }, 500);
   }
 };
