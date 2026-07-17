@@ -5,6 +5,7 @@
   "dependencies": {
     "node-appwrite": "^13.0.0",
     "mammoth": "^1.8.0",
-    "adm-zip": "^0.5.16"
+    "adm-zip": "^0.5.16",
+    "pdfjs-dist": "3.11.174"
   }
 }
