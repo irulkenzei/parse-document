@@ -145,6 +145,125 @@ async function extractChaptersFromDocx(buffer) {
 }
 
 // ============================================================
+// 🆕 PDF -- extract teks TIAP HALAMAN via pdfjs-dist, lalu coba baca
+// outline/bookmark (daftar isi digital) buat mecah jadi per-chapter.
+// Tiap entry outline di-resolve ke NOMOR HALAMAN, dipakai buat motong
+// gabungan teks halaman jadi rentang per-chapter.
+//
+// Kalau PDF-nya gak punya outline (banyak PDF hasil scan/export gak
+// nyertain ini), atau semua entry-nya gagal di-resolve: fallback ke 1
+// chapter utuh -- lebih baik daripada gagal total. Kalau PDF-nya hasil
+// SCAN GAMBAR (gak ada teks asli sama sekali, cuma foto halaman), gak ada
+// yang bisa diekstrak -- itu butuh OCR (beda alur, di luar scope ini),
+// jadi dilempar error yang jelas, bukan gagal diam-diam.
+//
+// ⚠️ pdfjs-dist versi 4+ cuma rilis ESM murni (pdf.mjs) yang gak bisa
+// di-require() langsung dari CommonJS function ini -- makanya versi yang
+// dipasang DIKUNCI ke 3.x (lihat catatan package.json di bawah), yang
+// masih nyediain build legacy/CJS (pdfjs-dist/legacy/build/pdf.js).
+// ============================================================
+async function extractChaptersFromPdf(buffer) {
+  const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(buffer),
+    disableFontFace: true,
+    useSystemFonts: true,
+  });
+  const pdfDocument = await loadingTask.promise;
+
+  // Judul dari metadata PDF (kalau penerbitnya ngisi field Title)
+  let title = null;
+  try {
+    const meta = await pdfDocument.getMetadata();
+    if (meta && meta.info && meta.info.Title) {
+      title = meta.info.Title.trim() || null;
+    }
+  } catch (_) {
+    // metadata gak wajib ada -- abaikan kalau gagal
+  }
+
+  // Ekstrak teks TIAP HALAMAN dulu -- dipakai baik buat mode "ada outline"
+  // maupun fallback "1 chapter utuh".
+  const pageTexts = [];
+  for (let i = 1; i <= pdfDocument.numPages; i++) {
+    const page = await pdfDocument.getPage(i);
+    const textContent = await page.getTextContent();
+    const text = textContent.items.map((item) => item.str).join(' ');
+    pageTexts.push(text);
+  }
+
+  // Coba baca outline/bookmark PDF. Cuma level PALING LUAR yang dipakai
+  // jadi batas chapter (sub-bab di dalamnya ikut jadi bagian chapter
+  // induknya) -- biar jumlah chapter gak meledak buat PDF yang outline-nya
+  // detail banget (misal tiap sub-sub-bagian punya entry sendiri).
+  let outline = null;
+  try {
+    outline = await pdfDocument.getOutline();
+  } catch (_) {
+    outline = null;
+  }
+
+  const chapterStarts = []; // [{ title, pageIndex }]
+  if (outline && outline.length > 0) {
+    for (const entry of outline) {
+      try {
+        let dest = entry.dest;
+        if (typeof dest === 'string') {
+          dest = await pdfDocument.getDestination(dest);
+        }
+        if (!Array.isArray(dest) || !dest[0]) continue;
+
+        const pageIndex = await pdfDocument.getPageIndex(dest[0]);
+        if (typeof pageIndex === 'number' && pageIndex >= 0) {
+          chapterStarts.push({
+            title: (entry.title && entry.title.trim()) || `Chapter ${chapterStarts.length + 1}`,
+            pageIndex,
+          });
+        }
+      } catch (_) {
+        // entry outline yang gak bisa di-resolve -- skip, jangan gagalin semua
+      }
+    }
+  }
+
+  // Urutkan & buang duplikat pageIndex (beberapa PDF punya >1 entry outline
+  // yang nunjuk ke halaman yang sama)
+  chapterStarts.sort((a, b) => a.pageIndex - b.pageIndex);
+  const uniqueStarts = [];
+  for (const s of chapterStarts) {
+    if (uniqueStarts.length === 0 || uniqueStarts[uniqueStarts.length - 1].pageIndex !== s.pageIndex) {
+      uniqueStarts.push(s);
+    }
+  }
+
+  let chapters = null;
+  if (uniqueStarts.length > 0) {
+    chapters = uniqueStarts
+      .map((start, i) => {
+        const endPage = i + 1 < uniqueStarts.length ? uniqueStarts[i + 1].pageIndex : pageTexts.length;
+        const content = pageTexts.slice(start.pageIndex, endPage).join('\n\n');
+        return { title: start.title, content };
+      })
+      .filter((ch) => ch.content.trim());
+  }
+
+  // Fallback -- PDF gak punya outline, atau semua entry-nya gagal
+  // di-resolve, atau hasil chapter kosong semua.
+  if (!chapters || chapters.length === 0) {
+    const fullText = pageTexts.join('\n\n');
+    if (!fullText.trim()) {
+      throw new Error(
+        'No readable text found in this PDF. It may be a scanned/image-only PDF, which needs OCR (not plain text extraction).'
+      );
+    }
+    chapters = [{ title: 'Full Document', content: fullText }];
+  }
+
+  return { title, chapters };
+}
+
+// ============================================================
 // MAIN HANDLER
 // ------------------------------------------------------------
 // 🔧 ARSITEKTUR: function ini dipanggil ASYNCHRONOUS (hindari limit 30
@@ -200,6 +319,10 @@ module.exports = async ({ req, res, log, error }) => {
       chapters = result.chapters;
     } else if (ext === 'docx') {
       chapters = await extractChaptersFromDocx(buffer);
+    } else if (ext === 'pdf') {
+      const result = await extractChaptersFromPdf(buffer);
+      if (result.title) title = result.title;
+      chapters = result.chapters;
     } else {
       // ⚠️ Tidak ada kolom error_message di collection `documents` --
       // detail error cukup di-log() server-side (kelihatan di tab
